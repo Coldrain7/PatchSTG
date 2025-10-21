@@ -8,8 +8,9 @@ import argparse
 import numpy as np
 import configparser
 from tqdm import tqdm
+import gc
 
-from models.model import PatchSTG
+from models.model import PatchSTG, MySTG
 from lib.utils import log_string, loadData, _compute_loss, metric
 
 class Solver(object):
@@ -40,14 +41,22 @@ class Solver(object):
 
         self.device = torch.device(f"cuda:{self.cuda}" if torch.cuda.is_available() else "cpu")
         self.build_model()
-    
-    def build_model(self):
-        self.model = PatchSTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
-                            self.node_num, self.spa_patchsize, self.spa_patchnum,
-                            self.tod, self.dow,
-                            self.layers, self.factors,
-                            self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
-                            self.ori_parts_idx, self.reo_parts_idx, self.reo_all_idx).to(self.device)
+
+    def build_model(self, model_name = 'MySTG'):
+        if model_name != 'PatchSTG' :
+            self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
+                                self.node_num, 20, 430,
+                                self.tod, self.dow,
+                                self.layers,
+                                self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
+                                0.1, 256).to(self.device)
+        else:
+            self.model = PatchSTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
+                                  self.node_num, self.spa_patchsize, self.spa_patchnum,
+                                  self.tod, self.dow,
+                                  self.layers, self.factors,
+                                  self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
+                                  self.ori_parts_idx, self.reo_parts_idx, self.reo_all_idx).to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(),
                                         lr=self.learning_rate,weight_decay=self.weight_decay)
@@ -80,7 +89,7 @@ class Solver(object):
 
                     pred.append(y_hat.cpu().numpy()*self.std+self.mean)
                     label.append(Y)
-        
+
         pred = np.concatenate(pred, axis = 0)
         label = np.concatenate(label, axis = 0)
 
@@ -94,13 +103,13 @@ class Solver(object):
             rmses.append(rmse)
             mapes.append(mape)
             log_string(log,'step %d, mae: %.4f, rmse: %.4f, mape: %.4f' % (i+1, mae, rmse, mape))
-        
+
         mae, rmse, mape = metric(pred, label)
         maes.append(mae)
         rmses.append(rmse)
         mapes.append(mape)
         log_string(log, 'average, mae: %.4f, rmse: %.4f, mape: %.4f' % (mae, rmse, mape))
-        
+
         return np.stack(maes, 0), np.stack(rmses, 0), np.stack(mapes, 0)
 
     def train(self):
@@ -108,13 +117,15 @@ class Solver(object):
         min_loss = 10000000.0
         num_train = self.trainX.shape[0]
 
-        for epoch in tqdm(range(1,self.max_epoch+1)):
+        for epoch in range(1,self.max_epoch+1):
             self.model.train()
             train_l_sum, train_acc_sum, batch_count, start = 0.0, 0.0, 0, time.time()
             permutation = np.random.permutation(num_train)
             self.trainX = self.trainX[permutation]
             self.trainY = self.trainY[permutation]
-            self.trainXTE = self.trainXTE[permutation]
+            self.trainXTE = self.trainXTE.astype(np.float16)
+            # 然后再执行重排
+            self.trainXTE = self.trainXTE[permutation].astype(np.float32)
             num_batch = math.ceil(num_train / self.batch_size)
             with tqdm(total=num_batch) as pbar:
                 for batch_idx in range(num_batch):
@@ -125,19 +136,19 @@ class Solver(object):
                     Y = self.trainY[start_idx : end_idx]
                     TE = torch.from_numpy(self.trainXTE[start_idx : end_idx]).to(self.device)
                     NormX = torch.from_numpy((X-self.mean)/self.std).float().to(self.device)
-                    
+
                     Y = torch.from_numpy(Y).float().to(self.device)
-                    
+
                     self.optimizer.zero_grad()
 
                     y_hat = self.model(NormX,TE)
 
                     loss = _compute_loss(Y, y_hat*self.std+self.mean)
-                    
+
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
                     self.optimizer.step()
-                    
+
                     train_l_sum += loss.cpu().item()
 
                     batch_count += 1
@@ -150,7 +161,7 @@ class Solver(object):
                 self.best_epoch = epoch
                 min_loss = mae[-1]
                 torch.save(self.model.state_dict(), self.model_file)
-        
+
         log_string(log, f'Best epoch is: {self.best_epoch}')
 
     def test(self):
@@ -177,7 +188,7 @@ class Solver(object):
 
                     pred.append(y_hat.cpu().numpy()*self.std+self.mean)
                     label.append(Y)
-        
+
         pred = np.concatenate(pred, axis = 0)
         label = np.concatenate(label, axis = 0)
 
@@ -191,15 +202,15 @@ class Solver(object):
             rmses.append(rmse)
             mapes.append(mape)
             log_string(log,'step %d, mae: %.4f, rmse: %.4f, mape: %.4f' % (i+1, mae, rmse, mape))
-        
+
         mae, rmse, mape = metric(pred, label)
         maes.append(mae)
         rmses.append(rmse)
         mapes.append(mape)
         log_string(log, 'average, mae: %.4f, rmse: %.4f, mape: %.4f' % (mae, rmse, mape))
-        
+
         return np.stack(maes, 0), np.stack(rmses, 0), np.stack(mapes, 0)
-        
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, help='configuration file')
@@ -251,7 +262,7 @@ if __name__ == '__main__':
         torch.manual_seed(args.seed)
         torch.cuda.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = True
-    
+
     log_string(log, '------------ Options -------------')
     for k, v in vars(args).items():
         log_string(log, '%s: %s' % (str(k), str(v)))
@@ -259,6 +270,6 @@ if __name__ == '__main__':
 
     solver = Solver(vars(args))
 
-    # solver.train()
+    solver.train()
     solver.test()
-    
+
