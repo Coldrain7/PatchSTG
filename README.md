@@ -97,6 +97,9 @@ You can access the pretrained weights from [[Google Drive]](https://drive.google
 2. We provide pre-trained weights of results in the paper and the detail configurations under the folder `./config`. For example, you can test the SD dataset by:
 
 ```
+python main.py --config ./config/CA.conf
+python main.py --config ./config/GBA.conf
+python main.py --config ./config/GLA.conf
 python main.py --config ./config/SD.conf
 ```
 
