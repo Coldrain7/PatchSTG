@@ -2,7 +2,10 @@ import os
 import torch
 import numpy as np
 import pandas as pd
+from numpy.array_api import int32
 from sklearn.metrics.pairwise import cosine_similarity
+from triton.language import dtype
+
 
 # log string
 def log_string(log, string):
@@ -48,8 +51,8 @@ def _compute_loss(y_true, y_predicted):
 def seq2instance(data, P, Q):
     num_step, nodes, dims = data.shape
     num_sample = num_step - P - Q + 1
-    x = np.zeros(shape = (num_sample, P, nodes, dims))
-    y = np.zeros(shape = (num_sample, Q, nodes, dims))
+    x = np.zeros(shape = (num_sample, P, nodes, dims), dtype=np.float32)
+    y = np.zeros(shape = (num_sample, Q, nodes, dims), dtype=np.float32)
     for i in range(num_sample):
         x[i] = data[i : i + P]
         y[i] = data[i + P : i + P + Q]
@@ -98,9 +101,9 @@ def reorderData(parts_idx, mxlen, adj, sps):
         else:
             auged_part_idx = part_idx
 
-        reo_parts_idx = np.concatenate([reo_parts_idx, np.arange(part_idx.shape[0])+sps*i])
-        ori_parts_idx = np.concatenate([ori_parts_idx, part_idx])
-        reo_all_idx = np.concatenate([reo_all_idx, auged_part_idx])
+        reo_parts_idx = np.concatenate([reo_parts_idx, np.arange(part_idx.shape[0])+sps*i], dtype=int32)
+        ori_parts_idx = np.concatenate([ori_parts_idx, part_idx], dtype=int32)
+        reo_all_idx = np.concatenate([reo_all_idx, auged_part_idx], dtype=int32)
 
     return ori_parts_idx, reo_parts_idx, reo_all_idx
 
@@ -128,13 +131,13 @@ def loadData(filepath, metapath, P, Q, train_ratio, test_ratio, adjpath, recurti
     locations = read_meta(metapath)
     num_step = Traffic.shape[0]
     # temporal positions
-    TE = np.zeros([num_step, 2])
+    TE = np.zeros([num_step, 2], dtype=np.float32)
     TE[:,0] = np.array([i % tod for i in range(num_step)])
     TE[:,1] = np.array([(i // tod) % dow for i in range(num_step)])
     TE_tile = np.repeat(np.expand_dims(TE, 1), Traffic.shape[1], 1)
     log_string(log, f'Shape of data: {Traffic.shape}')
     log_string(log, f'Shape of locations: {locations.shape}')
-    # train/val/test 
+    # train/val/test
     train_steps = round(train_ratio * num_step)
     test_steps = round(test_ratio * num_step)
     val_steps = num_step - train_steps - test_steps
@@ -164,6 +167,6 @@ def loadData(filepath, metapath, P, Q, train_ratio, test_ratio, adjpath, recurti
     log_string(log, f'Shape of Validation: {valY.shape}')
     log_string(log, f'Shape of Test: {testY.shape}')
     log_string(log, f'Mean: {mean} & Std: {std}')
-    
+
     return trainX, trainY, trainXTE, trainYTE, valX, valY, valXTE, valYTE, testX, testY, testXTE, testYTE, mean, std, ori_parts_idx, reo_parts_idx, reo_all_idx
-    
+
