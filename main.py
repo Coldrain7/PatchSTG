@@ -85,7 +85,7 @@ class Solver(object):
                     TE = torch.from_numpy(self.valXTE[start_idx : end_idx]).to(self.device)
                     NormX = torch.from_numpy((X-self.mean)/self.std).float().to(self.device)
 
-                    y_hat = self.model(NormX,TE)
+                    y_hat, G = self.model(NormX,TE)
 
                     pred.append(y_hat.cpu().numpy()*self.std+self.mean)
                     label.append(Y)
@@ -141,9 +141,13 @@ class Solver(object):
 
                     self.optimizer.zero_grad()
 
-                    y_hat = self.model(NormX,TE)
+                    y_hat, G = self.model(NormX,TE)
+                    group_probs = F.softmax(G, dim=1)
+                    epsilon=1e-8
+                    row_entropy = -torch.sum(group_probs * torch.log(group_probs + epsilon), dim=1)
+                    mean_entropy = torch.mean(row_entropy)
 
-                    loss = _compute_loss(Y, y_hat*self.std+self.mean)
+                    loss = _compute_loss(Y, y_hat*self.std+self.mean) + mean_entropy
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
@@ -166,7 +170,7 @@ class Solver(object):
 
     def test(self):
         log_string(log, "======================TEST MODE======================")
-        self.model.load_state_dict(torch.load(self.model_file, map_location=self.device))
+        self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
         self.model.eval()
         num_val = self.testX.shape[0]
         pred = []
@@ -184,7 +188,7 @@ class Solver(object):
                     TE = torch.from_numpy(self.testXTE[start_idx : end_idx]).to(self.device)
                     NormX = torch.from_numpy((X-self.mean)/self.std).float().to(self.device)
 
-                    y_hat = self.model(NormX,TE)
+                    y_hat, G = self.model(NormX,TE)
 
                     pred.append(y_hat.cpu().numpy()*self.std+self.mean)
                     label.append(Y)

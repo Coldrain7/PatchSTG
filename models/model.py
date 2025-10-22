@@ -170,6 +170,9 @@ class MySTG(nn.Module):
             nn.Linear(64, group_num)
         )
         nn.init.kaiming_uniform_(self.group_matrix, a=math.sqrt(5))
+        self.res_mlp = nn.Sequential(nn.Linear(dims, dims//2),
+                                     nn.ReLU(),
+                                     nn.Linear(dims//2, dims))
         # nn.init.xavier_normal_(self.group_matrix)
 
     def forward(self, x, te):
@@ -187,7 +190,8 @@ class MySTG(nn.Module):
         group_out = self.group_transformer(group_x.squeeze(1))
         group_out = G @ group_out
         # group_out = torch.einsum('bng,bgd->bnd', G, group_out)
-        group_out = group_out.transpose(1,2).unsqueeze(-1)
+        mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
+        mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
         # group_matrix = self.group_matrix.unsqueeze(0).expand(batch_size, -1, -1)  # (B, N, g)
 
@@ -208,10 +212,10 @@ class MySTG(nn.Module):
         # out = torch.cat([member_out, group_out], dim=-1)
         # out = self.regression(out).transpose(1,2).unsqueeze(-1)
         # projection decoder -> section 4.4 in paper
-        # out(batch_size, D, N, 1)
-        pred_y = self.regression_conv(group_out)
+        # out(B, D, N, 1)
+        pred_y = self.regression_conv(mlp_out)
 
-        return pred_y # [B,T,N,1]
+        return pred_y, G # [B,T,N,1]
 
     def embedding(self, x, te):
         b,t,n,_ = x.shape
