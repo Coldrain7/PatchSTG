@@ -45,7 +45,7 @@ class Solver(object):
     def build_model(self, model_name = 'MySTG'):
         if model_name != 'PatchSTG' :
             self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
-                                self.node_num, 20, 430,
+                                self.node_num, 200, 43,
                                 self.tod, self.dow,
                                 self.layers,
                                 self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
@@ -165,7 +165,13 @@ class Solver(object):
                 self.best_epoch = epoch
                 min_loss = mae[-1]
                 torch.save(self.model.state_dict(), self.model_file)
+                counter = 0
+            else:
+                counter += 1
 
+            if counter >= self.patience:
+                print(f"Early stopping triggered at epoch {epoch}!")
+                break
         log_string(log, f'Best epoch is: {self.best_epoch}')
 
     def test(self):
@@ -226,6 +232,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type = int, default = config['train']['seed'])
     parser.add_argument('--batch_size', type = int, default = config['train']['batch_size'])
     parser.add_argument('--max_epoch', type = int, default = config['train']['max_epoch'])
+    parser.add_argument('--patience', type = int, default = config['train']['patience'])
     parser.add_argument('--learning_rate', type=float, default = config['train']['learning_rate'])
     parser.add_argument('--weight_decay', type=float, default = config['train']['weight_decay'])
 
