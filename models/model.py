@@ -169,11 +169,11 @@ class MySTG(nn.Module):
             nn.ReLU(),
             nn.Linear(64, group_num)
         )
-        nn.init.kaiming_uniform_(self.group_matrix, a=math.sqrt(5))
+        # nn.init.kaiming_uniform_(self.group_matrix, a=math.sqrt(5))
         self.res_mlp = nn.Sequential(nn.Linear(dims, dims//2),
                                      nn.ReLU(),
                                      nn.Linear(dims//2, dims))
-        # nn.init.xavier_normal_(self.group_matrix)
+        nn.init.xavier_normal_(self.group_matrix)
 
     def forward(self, x, te):
         # x: [B,T,N,1] input traffic
@@ -184,8 +184,8 @@ class MySTG(nn.Module):
         batch_size, _, num_nodes, dim = embedded_x.shape
         # embedded_x: [B,1,N,D] input traffic
         # dynamic_weights = self.group_learner(embedded_x.squeeze(1))  # [B, N, g]
-        G = F.softmax(self.group_matrix, dim=0)
-        # group_x = torch.einsum('bgn,bnd->bgd', G.transpose(1,2), embedded_x.squeeze(1))
+        group_matrix = self.group_matrix
+        G = F.softmax(self.group_matrix, dim=1)
         group_x = G.transpose(0,1) @ embedded_x
         group_out = self.group_transformer(group_x.squeeze(1))
         group_out = G @ group_out
@@ -193,7 +193,6 @@ class MySTG(nn.Module):
         mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
         mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
-        # group_matrix = self.group_matrix.unsqueeze(0).expand(batch_size, -1, -1)  # (B, N, g)
 
         # topk_values, indices = torch.topk(group_matrix, k=self.group_size, dim=1)  # indices.shape: (B, s, g)
         # indices = indices.permute(0, 2, 1)  # shape: (B, g, s)
@@ -215,7 +214,7 @@ class MySTG(nn.Module):
         # out(B, D, N, 1)
         pred_y = self.regression_conv(mlp_out)
 
-        return pred_y, G # [B,T,N,1]
+        return pred_y, group_matrix # [B,T,N,1]
 
     def embedding(self, x, te):
         b,t,n,_ = x.shape
