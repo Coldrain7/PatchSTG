@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 from timm.models.vision_transformer import Attention, Mlp
@@ -127,12 +128,13 @@ class MySTG(nn.Module):
                         node_num, group_size, group_num,
                         tod, dow,
                         layers,
-                        input_dims, node_dims, tod_dims, dow_dims, dropout, ff_dim
+                        input_dims, node_dims, tod_dims, dow_dims, dropout, ff_dim, group_matrix
                 ):
         super(MySTG, self).__init__()
         self.node_num = node_num
         self.tod, self.dow = tod, dow
         self.group_size = group_size
+        self.group_num = group_num
 
         # model_dims = input_emb + spa_emb + tem_emb
         dims = input_dims + tod_dims + dow_dims + node_dims
@@ -163,7 +165,13 @@ class MySTG(nn.Module):
         self.regression = nn.Linear(dims*2, dims)
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum * dims, out_channels=output_len, kernel_size=(1, 1),
                                          bias=True)
-        self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
+        # self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
+        # numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
+        if group_matrix is not None:
+            self.group_matrix =  nn.Parameter(group_matrix, requires_grad=True)
+        else:
+            self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
+            nn.init.xavier_normal_(self.group_matrix)
         self.group_learner = nn.Sequential(
             nn.Linear(dims, 64),
             nn.ReLU(),
@@ -173,7 +181,7 @@ class MySTG(nn.Module):
         self.res_mlp = nn.Sequential(nn.Linear(dims, dims//2),
                                      nn.ReLU(),
                                      nn.Linear(dims//2, dims))
-        nn.init.xavier_normal_(self.group_matrix)
+        # nn.init.xavier_normal_(self.group_matrix)
 
     def forward(self, x, te):
         # x: [B,T,N,1] input traffic
@@ -190,29 +198,44 @@ class MySTG(nn.Module):
         group_out = self.group_transformer(group_x.squeeze(1))
         group_out = G @ group_out
         # group_out = torch.einsum('bng,bgd->bnd', G, group_out)
-        mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
-        mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
+        group_out_res = group_out+embedded_x.squeeze(1)
+        # mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
+        # mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
+        group_indices = torch.argmax(G, dim=1)  # (N,)
 
-        # topk_values, indices = torch.topk(group_matrix, k=self.group_size, dim=1)  # indices.shape: (B, s, g)
-        # indices = indices.permute(0, 2, 1)  # shape: (B, g, s)
+        # 2. 批量处理：按分组索引排序，然后批量处理
+        sorted_indices = torch.argsort(group_indices)
+        sorted_embeddings = group_out_res[:,sorted_indices,:]
+        sorted_group_indices = group_indices[sorted_indices]
 
-        # 简洁方法：直接创建批次索引
-        # batch_indices = torch.arange(batch_size, device=embedded_x.device)
-        # batch_indices = batch_indices.view(batch_size, 1, 1).expand(-1, indices.size(1), indices.size(2))  # (B, g, s)
+        # 3. 找到每个分组的边界
+        group_boundaries = torch.cat([
+            torch.tensor([0], device=group_out_res.device),
+            torch.where(torch.diff(sorted_group_indices) != 0)[0] + 1,
+            torch.tensor([num_nodes], device=group_out_res.device)
+        ])
 
-        # 直接索引，不需要扩展特征维度
-        # selected_features = group_out.squeeze(1)[batch_indices, indices]  # (B, g, s, D)
+        # 4. 批量处理每个分组（避免小矩阵操作）
+        processed_embeddings = torch.zeros_like(sorted_embeddings)
 
-        # 重新reshape为 (B*g, s, D)
-        #group_features = selected_features.reshape(-1, self.group_size, dim)
-        #member_out = self.member_transformer(group_features).reshape(batch_size, -1, dim).transpose(1,2).unsqueeze(-1)
+        for i in range(len(group_boundaries) - 1):
+            start, end = group_boundaries[i], group_boundaries[i+1]
+            group_size = end - start
 
-        # out = torch.cat([member_out, group_out], dim=-1)
-        # out = self.regression(out).transpose(1,2).unsqueeze(-1)
-        # projection decoder -> section 4.4 in paper
-        # out(B, D, N, 1)
-        pred_y = self.regression_conv(mlp_out)
+            if group_size > 0:
+                # 批量处理整个分组
+                group_emb = sorted_embeddings[:, start:end, :]
+
+                # Transformer处理
+                processed_group = self.member_transformer(group_emb)
+                processed_embeddings[:, start:end, :] = processed_group
+
+        # 5. 还原原始顺序
+        reverse_indices = torch.argsort(sorted_indices)
+        result = processed_embeddings[:, reverse_indices, :].transpose(1, 2).unsqueeze(-1)
+
+        pred_y = self.regression_conv(result)
 
         return pred_y, group_matrix # [B,T,N,1]
 
