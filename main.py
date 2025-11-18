@@ -44,12 +44,14 @@ class Solver(object):
 
     def build_model(self, model_name = 'MySTG'):
         if model_name != 'PatchSTG' :
+            numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
+            group_matrix = torch.from_numpy(numpy_array).to(torch.float32).to(self.device)
             self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
                                 self.node_num, 200, 43,
                                 self.tod, self.dow,
                                 self.layers,
                                 self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
-                                0.1, 256).to(self.device)
+                                0.1, 256, group_matrix).to(self.device)
         else:
             self.model = PatchSTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
                                   self.node_num, self.spa_patchsize, self.spa_patchnum,
@@ -114,6 +116,7 @@ class Solver(object):
 
     def train(self):
         log_string(log, "======================TRAIN MODE======================")
+        #self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
         min_loss = 10000000.0
         num_train = self.trainX.shape[0]
 
