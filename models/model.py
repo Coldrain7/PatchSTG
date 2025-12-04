@@ -192,7 +192,7 @@ class MySTG(nn.Module):
         batch_size, _, num_nodes, dim = embedded_x.shape
         # embedded_x: [B,1,N,D] input traffic
         # dynamic_weights = self.group_learner(embedded_x.squeeze(1))  # [B, N, g]
-        group_matrix = self.group_matrix
+        group_matrix = self.group_matrix #group_matrix: [node_num, group_num]
         G = F.softmax(self.group_matrix, dim=0)
         group_x = G.transpose(0,1) @ embedded_x
         group_out = self.group_transformer(group_x.squeeze(1))

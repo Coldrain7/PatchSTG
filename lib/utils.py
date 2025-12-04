@@ -2,7 +2,6 @@ import os
 import torch
 import numpy as np
 import pandas as pd
-from numpy.array_api import int32
 from sklearn.metrics.pairwise import cosine_similarity
 from triton.language import dtype
 
@@ -101,9 +100,9 @@ def reorderData(parts_idx, mxlen, adj, sps):
         else:
             auged_part_idx = part_idx
 
-        reo_parts_idx = np.concatenate([reo_parts_idx, np.arange(part_idx.shape[0])+sps*i], dtype=int32)
-        ori_parts_idx = np.concatenate([ori_parts_idx, part_idx], dtype=int32)
-        reo_all_idx = np.concatenate([reo_all_idx, auged_part_idx], dtype=int32)
+        reo_parts_idx = np.concatenate([reo_parts_idx, np.arange(part_idx.shape[0])+sps*i], dtype=np.int32)
+        ori_parts_idx = np.concatenate([ori_parts_idx, part_idx], dtype=np.int32)
+        reo_all_idx = np.concatenate([reo_all_idx, auged_part_idx], dtype=np.int32)
 
     return ori_parts_idx, reo_parts_idx, reo_all_idx
 

@@ -1,3 +1,5 @@
+import os.path
+
 import math
 import time
 import torch
@@ -8,7 +10,6 @@ import argparse
 import numpy as np
 import configparser
 from tqdm import tqdm
-import gc
 
 from models.model import PatchSTG, MySTG
 from lib.utils import log_string, loadData, _compute_loss, metric
@@ -44,8 +45,9 @@ class Solver(object):
 
     def build_model(self, model_name = 'MySTG'):
         if model_name != 'PatchSTG' :
-            numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
-            group_matrix = torch.from_numpy(numpy_array).to(torch.float32).to(self.device)
+            #numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
+            #group_matrix = torch.from_numpy(numpy_array).to(torch.float32).to(self.device)
+            group_matrix = None
             self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
                                 self.node_num, 200, 43,
                                 self.tod, self.dow,
@@ -116,11 +118,26 @@ class Solver(object):
 
     def train(self):
         log_string(log, "======================TRAIN MODE======================")
-        #self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
+        # self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
+        start_epoch = 0
         min_loss = 10000000.0
         num_train = self.trainX.shape[0]
+        counter = 0
+        if os.path.exists(self.checkpoint_file):
+            log_string(log, f"Loading checkpoint from {self.checkpoint_file}")
+            checkpoint = torch.load(self.checkpoint_file, map_location='cpu', weights_only=False)
+            self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.lr_scheduler.load_state_dict(checkpoint['scheduler'])
+            self.model.load_state_dict(torch.load(self.model_file, map_location=self.device, weights_only=False))
 
-        for epoch in range(1,self.max_epoch+1):
+            start_epoch = checkpoint['epoch']+1
+            counter = checkpoint['counter']
+            min_loss = checkpoint['min_loss']
+            self.best_epoch = checkpoint['best_epoch']
+            log_string(log, f"Resuming training from epoch {start_epoch}")
+
+        for epoch in range(start_epoch,self.max_epoch+1):
             self.model.train()
             train_l_sum, train_acc_sum, batch_count, start = 0.0, 0.0, 0, time.time()
             permutation = np.random.permutation(num_train)
@@ -171,7 +188,15 @@ class Solver(object):
                 counter = 0
             else:
                 counter += 1
-
+            checkpoint = {
+                'epoch': epoch,
+                'optimizer': self.optimizer.state_dict(),
+                'scheduler': self.lr_scheduler.state_dict(),
+                'counter': counter,
+                'min_loss': min_loss,
+                'best_epoch': self.best_epoch
+            }
+            torch.save(checkpoint, self.checkpoint_file)
             if counter >= self.patience:
                 print(f"Early stopping triggered at epoch {epoch}!")
                 break
@@ -264,11 +289,12 @@ if __name__ == '__main__':
     parser.add_argument('--meta_file', default = config['file']['meta'])
     parser.add_argument('--adj_file', default = config['file']['adj'])
     parser.add_argument('--model_file', default = config['file']['model'])
+    parser.add_argument('--checkpoint_file', default = config['file']['checkpoint'])
     parser.add_argument('--log_file', default = config['file']['log'])
 
     args = parser.parse_args()
 
-    log = open(args.log_file, 'w')
+    log = open(args.log_file, 'a')
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -284,6 +310,6 @@ if __name__ == '__main__':
 
     solver = Solver(vars(args))
 
-    solver.train()
+    #solver.train()
     solver.test()
 
