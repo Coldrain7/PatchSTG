@@ -173,6 +173,7 @@ class Solver(object):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
                     self.optimizer.step()
 
+
                     train_l_sum += loss.cpu().item()
 
                     batch_count += 1
