@@ -286,7 +286,7 @@ class CrossAttentionBlock(nn.Module):
         # Layer Norms
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
+        #self.norm3 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
@@ -297,28 +297,26 @@ class CrossAttentionBlock(nn.Module):
         context: [B, N, D]  group context for each node
         """
         # Self-Attention
-        x_ori = x
-        x2 = self.norm1(x)
         x2, _ = self.self_attn(
-            context, x2, x2,
+            context, x, x,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )
-        x = x + self.dropout1(x2)
-
+        # x = x + self.dropout1(x2)
+        g = torch.cat([x2, x], dim=1)
         # Cross-Attention: Query=x, Key=Value=context
-        x2 = self.norm2(x)
         x2, _ = self.cross_attn(
-            x_ori, x2, x2,
+            x, g, g,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )
         x = x + self.dropout2(x2)
 
         # FFN
-        x2 = self.norm3(x)
+        x2 = self.norm1(x)
         x2 = self.linear2(self.dropout(F.gelu(self.linear1(x2))))
         x = x + self.dropout3(x2)
+        x = self.norm2(x)
 
         return x
 
