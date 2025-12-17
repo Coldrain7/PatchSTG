@@ -179,8 +179,8 @@ class Solver(object):
 
                     batch_count += 1
                     pbar.update(1)
-            log_string(log, 'epoch %d, lr %.6f, loss %.4f, time %.1f sec'
-                % (epoch, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count, time.time() - start))
+            log_string(log, 'epoch %d (%d/10), lr %.6f, loss %.4f, time %.1f sec'
+                % (epoch, counter, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count, time.time() - start))
             mae, rmse, mape = self.vali()
             self.lr_scheduler.step()
             if mae[-1] < min_loss:
