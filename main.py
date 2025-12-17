@@ -49,7 +49,8 @@ class Solver(object):
             #group_matrix = torch.from_numpy(numpy_array).to(torch.float32).to(self.device)
             group_matrix = None
             self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
-                                self.node_num, 200, 43,
+                               #TODO:记得添加config参数修改group_num
+                                self.node_num, 200, 26,
                                 self.tod, self.dow,
                                 self.layers,
                                 self.input_dims, self.node_dims, self.tod_dims, self.dow_dims,
@@ -311,6 +312,6 @@ if __name__ == '__main__':
 
     solver = Solver(vars(args))
 
-    #solver.train()
+    solver.train()
     solver.test()
 

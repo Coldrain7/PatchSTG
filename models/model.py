@@ -158,11 +158,15 @@ class MySTG(nn.Module):
             nn.TransformerEncoderLayer(dims, nhead=4, dim_feedforward=ff_dim, dropout=dropout, batch_first=True),
             layers
         )
-        self.member_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(dims, nhead=4, dim_feedforward=ff_dim, dropout=dropout, batch_first=True),
-            layers)
+        # self.member_transformer = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(dims, nhead=4, dim_feedforward=ff_dim, dropout=dropout, batch_first=True),
+        #     layers)
+        self.member_transformer_layers = nn.ModuleList([
+            CrossAttentionBlock(d_model=dims, nhead=4, dim_feedforward=ff_dim, dropout=dropout, batch_first=True)
+            for _ in range(layers)
+        ])
         # projection decoder -> section 4.4 in paper
-        self.regression = nn.Linear(dims*2, dims)
+        #self.regression = nn.Linear(dims*2, dims)
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum * dims, out_channels=output_len, kernel_size=(1, 1),
                                          bias=True)
         # self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
@@ -172,15 +176,14 @@ class MySTG(nn.Module):
         else:
             self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
             nn.init.xavier_normal_(self.group_matrix)
-        self.group_learner = nn.Sequential(
-            nn.Linear(dims, 64),
-            nn.ReLU(),
-            nn.Linear(64, group_num)
-        )
-        # nn.init.kaiming_uniform_(self.group_matrix, a=math.sqrt(5))
-        self.res_mlp = nn.Sequential(nn.Linear(dims, dims//2),
-                                     nn.ReLU(),
-                                     nn.Linear(dims//2, dims))
+        # self.group_learner = nn.Sequential(
+        #     nn.Linear(dims, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, group_num)
+        # )
+        # self.res_mlp = nn.Sequential(nn.Linear(dims, dims//2),
+        #                              nn.ReLU(),
+        #                              nn.Linear(dims//2, dims))
         # nn.init.xavier_normal_(self.group_matrix)
 
     def forward(self, x, te):
@@ -191,23 +194,21 @@ class MySTG(nn.Module):
         embedded_x = self.embedding(x, te)
         batch_size, _, num_nodes, dim = embedded_x.shape
         # embedded_x: [B,1,N,D] input traffic
-        # dynamic_weights = self.group_learner(embedded_x.squeeze(1))  # [B, N, g]
         group_matrix = self.group_matrix #group_matrix: [node_num, group_num]
         G = F.softmax(self.group_matrix, dim=0)
         group_x = G.transpose(0,1) @ embedded_x
-        group_out = self.group_transformer(group_x.squeeze(1))
-        group_out = G @ group_out
-        # group_out = torch.einsum('bng,bgd->bnd', G, group_out)
-        group_out_res = group_out+embedded_x.squeeze(1)
+        group_out = self.group_transformer(group_x.squeeze(1)) #[B, g, D]
+        group_out_G = G @ group_out
+        group_out_res = group_out_G+embedded_x.squeeze(1) #[B, N, D]
         # mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
         # mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
-        group_indices = torch.argmax(G, dim=1)  # (N,)
+        group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
 
         # 2. 批量处理：按分组索引排序，然后批量处理
         sorted_indices = torch.argsort(group_indices)
         sorted_embeddings = group_out_res[:,sorted_indices,:]
-        sorted_group_indices = group_indices[sorted_indices]
+        sorted_group_indices = group_indices[sorted_indices] # recording sorted group indices
 
         # 3. 找到每个分组的边界
         group_boundaries = torch.cat([
@@ -215,10 +216,13 @@ class MySTG(nn.Module):
             torch.where(torch.diff(sorted_group_indices) != 0)[0] + 1,
             torch.tensor([num_nodes], device=group_out_res.device)
         ])
+        group_context = group_out.gather(
+            1,
+            sorted_group_indices.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, dim)
+        )  # [B, N, D]
 
         # 4. 批量处理每个分组（避免小矩阵操作）
         processed_embeddings = torch.zeros_like(sorted_embeddings)
-
         for i in range(len(group_boundaries) - 1):
             start, end = group_boundaries[i], group_boundaries[i+1]
             group_size = end - start
@@ -226,10 +230,13 @@ class MySTG(nn.Module):
             if group_size > 0:
                 # 批量处理整个分组
                 group_emb = sorted_embeddings[:, start:end, :]
+                context = group_context[:, start:end, :]
 
                 # Transformer处理
-                processed_group = self.member_transformer(group_emb)
-                processed_embeddings[:, start:end, :] = processed_group
+                #processed_group = self.member_transformer(group_emb)
+                for layer in self.member_transformer_layers:
+                    group_emb = layer(group_emb, context)
+                processed_embeddings[:, start:end, :] = group_emb
 
         # 5. 还原原始顺序
         reverse_indices = torch.argsort(sorted_indices)
@@ -260,3 +267,58 @@ class MySTG(nn.Module):
         input_data = torch.cat([input_data, node_emb], -1)
 
         return input_data
+
+class CrossAttentionBlock(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1, batch_first=True):
+        super().__init__()
+        # Self-Attention
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        # Cross-Attention: Query = nodes, Key/Value = group context
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        # FFN
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout = nn.Dropout(dropout)
+        # Layer Norms
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+
+    def forward(self, x, context, src_mask=None, src_key_padding_mask=None):
+        """
+        x: [B, N, D]  node features
+        context: [B, N, D]  group context for each node
+        """
+        # Self-Attention
+        x_ori = x
+        x2 = self.norm1(x)
+        x2, _ = self.self_attn(
+            context, x2, x2,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask
+        )
+        x = x + self.dropout1(x2)
+
+        # Cross-Attention: Query=x, Key=Value=context
+        x2 = self.norm2(x)
+        x2, _ = self.cross_attn(
+            x_ori, x2, x2,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask
+        )
+        x = x + self.dropout2(x2)
+
+        # FFN
+        x2 = self.norm3(x)
+        x2 = self.linear2(self.dropout(F.gelu(self.linear1(x2))))
+        x = x + self.dropout3(x2)
+
+        return x
+
