@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from timm.models.vision_transformer import Attention, Mlp
 import torch.nn.functional as F
+from torch.distributed import group
+
 
 class WindowAttBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0):
@@ -135,6 +137,7 @@ class MySTG(nn.Module):
         self.tod, self.dow = tod, dow
         self.group_size = group_size
         self.group_num = group_num
+        self.node_dims = node_dims
 
         # model_dims = input_emb + spa_emb + tem_emb
         dims = input_dims + tod_dims + dow_dims + node_dims
@@ -146,6 +149,9 @@ class MySTG(nn.Module):
         self.node_emb = nn.Parameter(
                 torch.empty(node_num, node_dims))
         nn.init.xavier_uniform_(self.node_emb)
+        self.group_emb = nn.Parameter(
+            torch.empty(group_num, node_dims))
+        nn.init.xavier_uniform_(self.group_emb)
         # tem_emb
         self.time_in_day_emb = nn.Parameter(
                 torch.empty(tod, tod_dims))
@@ -170,12 +176,13 @@ class MySTG(nn.Module):
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum * dims, out_channels=output_len, kernel_size=(1, 1),
                                          bias=True)
         # self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
-        # numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
-        if group_matrix is not None:
-            self.group_matrix =  nn.Parameter(group_matrix, requires_grad=True)
-        else:
-            self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
-            nn.init.xavier_normal_(self.group_matrix)
+        # numpy_array = np.loadtxt('models/G_ca.csv', delimiter=',', dtype=np.float32)
+        #self.group_pos_emb = nn.Parameter(torch.randn(1, group_num, dims))
+        # if group_matrix is not None:
+        #     self.group_matrix =  nn.Parameter(group_matrix, requires_grad=True)
+        # else:
+        #     self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
+        #     nn.init.xavier_normal_(self.group_matrix)
         # self.group_learner = nn.Sequential(
         #     nn.Linear(dims, 64),
         #     nn.ReLU(),
@@ -191,11 +198,28 @@ class MySTG(nn.Module):
         # te: [B,T,N,2] time information
 
         # spatio-temporal embedding -> section 4.1 in paper
-        embedded_x = self.embedding(x, te)
-        batch_size, _, num_nodes, dim = embedded_x.shape
+
         # embedded_x: [B,1,N,D] input traffic
-        group_matrix = self.group_matrix #group_matrix: [node_num, group_num]
-        G = F.softmax(self.group_matrix, dim=0)
+        #group_matrix = self.group_matrix #group_matrix: [node_num, group_num]
+        #G = F.softmax(self.group_matrix, dim=0)
+        group_matrix = self.node_emb @ self.group_emb.transpose(0, 1)
+        G=F.softmax(group_matrix, dim=-1)
+
+        group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
+
+        # 2. 批量处理：按分组索引排序，然后批量处理
+        sorted_indices = torch.argsort(group_indices)
+        sorted_group_indices = group_indices[sorted_indices] # recording sorted group indices
+
+        group_emb = self.group_emb.gather(
+            0,
+            sorted_group_indices.unsqueeze(-1).expand(-1, self.node_dims)
+        )
+        node_emb = self.node_emb + group_emb
+
+        embedded_x = self.embedding(x, te, node_emb)
+        batch_size, _, num_nodes, dim = embedded_x.shape
+
         group_x = G.transpose(0,1) @ embedded_x
         group_out = self.group_transformer(group_x.squeeze(1)) #[B, g, D]
         group_out_G = G @ group_out
@@ -203,12 +227,7 @@ class MySTG(nn.Module):
         # mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
         # mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
-        group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
-
-        # 2. 批量处理：按分组索引排序，然后批量处理
-        sorted_indices = torch.argsort(group_indices)
         sorted_embeddings = group_out_res[:,sorted_indices,:]
-        sorted_group_indices = group_indices[sorted_indices] # recording sorted group indices
 
         # 3. 找到每个分组的边界
         group_boundaries = torch.cat([
@@ -216,7 +235,7 @@ class MySTG(nn.Module):
             torch.where(torch.diff(sorted_group_indices) != 0)[0] + 1,
             torch.tensor([num_nodes], device=group_out_res.device)
         ])
-        group_context = group_out.gather(
+        group_context = group_x.squeeze(1).gather(
             1,
             sorted_group_indices.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, dim)
         )  # [B, N, D]
@@ -246,7 +265,7 @@ class MySTG(nn.Module):
 
         return pred_y, group_matrix # [B,T,N,1]
 
-    def embedding(self, x, te):
+    def embedding(self, x, te, node_emb):
         b,t,n,_ = x.shape
 
         # input traffic + time of day + day of week as the input signal
@@ -263,7 +282,7 @@ class MySTG(nn.Module):
         input_data = torch.cat([input_data, self.day_in_week_emb[(d_i_w_data).type(torch.LongTensor)]], -1)
 
         # cat spatial embedding
-        node_emb = self.node_emb.unsqueeze(0).unsqueeze(1).expand(b, t, -1, -1)
+        node_emb = node_emb.unsqueeze(0).unsqueeze(1).expand(b, t, -1, -1)
         input_data = torch.cat([input_data, node_emb], -1)
 
         return input_data
@@ -286,7 +305,7 @@ class CrossAttentionBlock(nn.Module):
         # Layer Norms
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        #self.norm3 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
@@ -296,27 +315,49 @@ class CrossAttentionBlock(nn.Module):
         x: [B, N, D]  node features
         context: [B, N, D]  group context for each node
         """
-        # Self-Attention
+        x_ori = x
+        x2 = self.norm1(x)
         x2, _ = self.self_attn(
-            context, x, x,
+            context, x2, x2,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )
-        # x = x + self.dropout1(x2)
-        g = torch.cat([x2, x], dim=1)
+        x = x + self.dropout1(x2)
+
         # Cross-Attention: Query=x, Key=Value=context
+        x2 = self.norm2(x)
         x2, _ = self.cross_attn(
-            x, g, g,
+            x_ori, x2, x2,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )
         x = x + self.dropout2(x2)
 
         # FFN
-        x2 = self.norm1(x)
+        x2 = self.norm3(x)
         x2 = self.linear2(self.dropout(F.gelu(self.linear1(x2))))
         x = x + self.dropout3(x2)
-        x = self.norm2(x)
+        # # Self-Attention
+        # x2, _ = self.self_attn(
+        #     context, x, x,
+        #     attn_mask=src_mask,
+        #     key_padding_mask=src_key_padding_mask
+        # )
+        # # x = x + self.dropout1(x2)
+        # g = torch.cat([x2, x], dim=1)
+        # # Cross-Attention: Query=x, Key=Value=context
+        # x2, _ = self.cross_attn(
+        #     x, g, g,
+        #     attn_mask=src_mask,
+        #     key_padding_mask=src_key_padding_mask
+        # )
+        # x = x + self.dropout2(x2)
+        #
+        # # FFN
+        # x2 = self.norm1(x)
+        # x2 = self.linear2(self.dropout(F.gelu(self.linear1(x2))))
+        # x = x + self.dropout3(x2)
+        # x = self.norm2(x)
 
         return x
 

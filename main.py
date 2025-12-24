@@ -45,7 +45,7 @@ class Solver(object):
 
     def build_model(self, model_name = 'MySTG'):
         if model_name != 'PatchSTG' :
-            #numpy_array = np.loadtxt('models/G.csv', delimiter=',', dtype=np.float32)
+            #numpy_array = np.loadtxt('models/G_ca.csv', delimiter=',', dtype=np.float32)
             #group_matrix = torch.from_numpy(numpy_array).to(torch.float32).to(self.device)
             group_matrix = None
             self.model = MySTG(self.output_len, self.tem_patchsize, self.tem_patchnum,
@@ -168,7 +168,7 @@ class Solver(object):
                     row_entropy = -torch.sum(group_probs * torch.log(group_probs + epsilon), dim=1)
                     mean_entropy = torch.mean(row_entropy)
 
-                    loss = _compute_loss(Y, y_hat*self.std+self.mean) + mean_entropy
+                    loss = _compute_loss(Y, y_hat*self.std+self.mean) #+ mean_entropy
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
@@ -312,6 +312,6 @@ if __name__ == '__main__':
 
     solver = Solver(vars(args))
 
-    solver.train()
+    #solver.train()
     solver.test()
 
