@@ -175,6 +175,16 @@ class MySTG(nn.Module):
         #self.regression = nn.Linear(dims*2, dims)
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum * dims, out_channels=output_len, kernel_size=(1, 1),
                                          bias=True)
+
+        # self.gcn_weight = nn.Parameter(torch.Tensor(dims, dims))
+        # nn.init.xavier_uniform_(self.gcn_weight)
+        # self.member_mixer = nn.Sequential(
+        #     nn.Linear(group_num, group_num*4),
+        #     nn.GELU(),
+        #     nn.Linear(group_num*4, group_num)
+        # )
+        # self.node_to_q = nn.Linear(node_dims, node_dims, bias=False) # 投影到匹配空间
+        # self.group_to_k = nn.Linear(node_dims, node_dims, bias=False)
         # self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
         # numpy_array = np.loadtxt('models/G_ca.csv', delimiter=',', dtype=np.float32)
         #self.group_pos_emb = nn.Parameter(torch.randn(1, group_num, dims))
@@ -202,10 +212,20 @@ class MySTG(nn.Module):
         # embedded_x: [B,1,N,D] input traffic
         #group_matrix = self.group_matrix #group_matrix: [node_num, group_num]
         #G = F.softmax(self.group_matrix, dim=0)
+        # node_q: [N, 64]
+        #node_q = self.node_to_q(self.node_emb)
+        # group_k: [G, 64]
+        #group_k = self.group_to_k(self.group_emb)
+        #group_matrix = node_q @ self.group_emb.transpose(0, 1)
+        #group_matrix = group_matrix / math.sqrt(self.node_dims)
         group_matrix = self.node_emb @ self.group_emb.transpose(0, 1)
         G=F.softmax(group_matrix, dim=-1)
 
         group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
+
+        index = G.max(dim=-1, keepdim=True)[1]
+        probs_hard = torch.zeros_like(group_matrix).scatter_(-1, index, 1.0)
+        probs = probs_hard - group_matrix.detach() + group_matrix
 
         # 2. 批量处理：按分组索引排序，然后批量处理
         sorted_indices = torch.argsort(group_indices)
@@ -221,6 +241,16 @@ class MySTG(nn.Module):
         batch_size, _, num_nodes, dim = embedded_x.shape
 
         group_x = G.transpose(0,1) @ embedded_x
+
+        # graph = torch.matmul(self.group_emb, self.group_emb.transpose(0, 1))
+        # group_graph = F.softmax(F.relu(graph), dim=-1)
+        #
+        # support = group_x.squeeze(1) @ self.gcn_weight
+        # gcn_out = group_graph @ support
+        # y = gcn_out.transpose(1, 2)
+        # y = self.member_mixer(y)
+        # group_out = y.transpose(1, 2)
+
         group_out = self.group_transformer(group_x.squeeze(1)) #[B, g, D]
         group_out_G = G @ group_out
         group_out_res = group_out_G+embedded_x.squeeze(1) #[B, N, D]
@@ -263,7 +293,7 @@ class MySTG(nn.Module):
 
         pred_y = self.regression_conv(result)
 
-        return pred_y, group_matrix # [B,T,N,1]
+        return pred_y, probs # [B,T,N,1]
 
     def embedding(self, x, te, node_emb):
         b,t,n,_ = x.shape
