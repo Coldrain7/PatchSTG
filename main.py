@@ -169,11 +169,11 @@ class Solver(object):
                     # mean_entropy = torch.mean(row_entropy)
 
                     loss = _compute_loss(Y, y_hat*self.std+self.mean) #+ mean_entropy
-                    # count_per_patch = probs.sum(dim=0)
-                    # mean_count = count_per_patch.mean()
-                    # balance_loss = (count_per_patch - mean_count).abs().mean()  # L1 loss
-                    #
-                    # loss = loss + 1.0 * balance_loss
+                    count_per_patch = probs.sum(dim=0)
+                    mean_count = count_per_patch.mean()
+                    balance_loss = (count_per_patch - mean_count).abs().mean()  # L1 loss
+
+                    loss = loss + 1.0 * balance_loss
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
@@ -181,15 +181,15 @@ class Solver(object):
 
 
                     train_l_sum += loss.cpu().item()
-                    #train_bal_l_sum += balance_loss.cpu().item()
+                    train_bal_l_sum += balance_loss.cpu().item()
 
                     batch_count += 1
                     pbar.update(1)
-            log_string(log, 'epoch %d (%d/10), lr %.6f, loss %.4f, time %.1f sec'
-                % (epoch, counter, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count, time.time() - start))
-            # log_string(log, 'epoch %d (%d/10), lr %.6f, total_loss %.4f, loss %.4f, bal_loss %.4f time %.1f sec'
-            #            % (epoch, counter, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count,
-            #               train_l_sum / batch_count - train_bal_l_sum / batch_count,  train_bal_l_sum / batch_count, time.time() - start))
+            # log_string(log, 'epoch %d (%d/10), lr %.6f, loss %.4f, time %.1f sec'
+            #     % (epoch, counter, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count, time.time() - start))
+            log_string(log, 'epoch %d (%d/15), lr %.6f, total_loss %.4f, loss %.4f, bal_loss %.4f time %.1f sec'
+                       % (epoch, counter, self.optimizer.param_groups[0]['lr'], train_l_sum / batch_count,
+                          train_l_sum / batch_count - train_bal_l_sum / batch_count,  train_bal_l_sum / batch_count, time.time() - start))
             mae, rmse, mape = self.vali()
             self.lr_scheduler.step()
             if mae[-1] < min_loss:
@@ -321,6 +321,6 @@ if __name__ == '__main__':
 
     solver = Solver(vars(args))
 
-    #solver.train()
+    solver.train()
     solver.test()
 

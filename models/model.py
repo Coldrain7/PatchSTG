@@ -176,13 +176,13 @@ class MySTG(nn.Module):
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum * dims, out_channels=output_len, kernel_size=(1, 1),
                                          bias=True)
 
-        # self.gcn_weight = nn.Parameter(torch.Tensor(dims, dims))
-        # nn.init.xavier_uniform_(self.gcn_weight)
-        # self.member_mixer = nn.Sequential(
-        #     nn.Linear(group_num, group_num*4),
-        #     nn.GELU(),
-        #     nn.Linear(group_num*4, group_num)
-        # )
+        self.gcn_weight = nn.Parameter(torch.Tensor(dims, dims))
+        nn.init.xavier_uniform_(self.gcn_weight)
+        self.member_mixer = nn.Sequential(
+            nn.Linear(group_num, group_num*4),
+            nn.GELU(),
+            nn.Linear(group_num*4, group_num)
+        )
         # self.node_to_q = nn.Linear(node_dims, node_dims, bias=False) # 投影到匹配空间
         # self.group_to_k = nn.Linear(node_dims, node_dims, bias=False)
         # self.group_matrix = nn.Parameter(torch.empty(node_num, group_num))
@@ -221,64 +221,121 @@ class MySTG(nn.Module):
         group_matrix = self.node_emb @ self.group_emb.transpose(0, 1)
         G=F.softmax(group_matrix, dim=-1)
 
-        group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
+        # index = G.max(dim=-1, keepdim=True)[1]
+        # probs_hard = torch.zeros_like(group_matrix).scatter_(-1, index, 1.0)
+        # probs = probs_hard - group_matrix.detach() + group_matrix
 
-        index = G.max(dim=-1, keepdim=True)[1]
-        probs_hard = torch.zeros_like(group_matrix).scatter_(-1, index, 1.0)
-        probs = probs_hard - group_matrix.detach() + group_matrix
+        # 假设 G: [N, g]
+        # 1. 找到每个节点属于哪些组
+        # 使用策略 A：Top-1 兜底 + 相对阈值
+        threshold = 0.065
+        max_vals, _ = G.max(dim=1, keepdim=True)
+        sample_thresholds = torch.clamp(max_vals, max=threshold)
+        mask = G >= sample_thresholds  # [N, g] Bool 矩阵
 
-        # 2. 批量处理：按分组索引排序，然后批量处理
-        sorted_indices = torch.argsort(group_indices)
-        sorted_group_indices = group_indices[sorted_indices] # recording sorted group indices
+        # 限制最大归属数 (可选，防止 OOM)
+        # 比如只保留每行前 3 大的 True
+        k = 3  # 每个节点最多属于 k 个组
 
-        group_emb = self.group_emb.gather(
-            0,
-            sorted_group_indices.unsqueeze(-1).expand(-1, self.node_dims)
-        )
-        node_emb = self.node_emb + group_emb
+        # 方法1：基于原始概率矩阵的topk
+        topk_values, topk_indices = G.topk(k, dim=1)  # 每行取前k大
+        topk_mask = torch.zeros_like(G, dtype=torch.bool)
+        # 将topk位置标记为True
+        topk_mask.scatter_(1, topk_indices, True)
+
+        # 最终掩码 = 阈值掩码 ∩ topk掩码 (取交集)
+        mask = mask & topk_mask
+
+        # 2. 生成扩展后的索引
+        # 找到 mask 中所有 True 的位置
+        # node_indices: 原始节点 ID
+        # group_indices: 对应的组 ID
+        node_idx, group_idx = torch.nonzero(mask, as_tuple=True)
+
+        # 接下来就像你原来那样，根据 sorted_group_idx 计算 group_boundaries
+        # 然后分段送入 Transformer
+        # ... Transformer 计算得到 sorted_output: [B, M, D] ...
+
+        # group_indices = torch.argmax(G, dim=1)  # (N,) recording nodes belongs to which group
+        #
+        # # 2. 批量处理：按分组索引排序，然后批量处理
+        # sorted_indices = torch.argsort(group_indices)
+        # sorted_group_indices = group_indices[sorted_indices] # recording sorted group indices
+        #
+        # group_emb = self.group_emb.gather(
+        #     0,
+        #     group_indices.unsqueeze(-1).expand(-1, self.node_dims)
+        # )
+
+        weights = torch.zeros_like(G)
+        weights[mask] = G[mask]  # 或设置为1用于平均
+
+        # 归一化（可选）
+        weights_sum = weights.sum(dim=1, keepdim=True)
+        weights = weights / torch.clamp(weights_sum, min=1e-8)
+        probs = weights
+
+        # 使用矩阵乘法计算加权组向量
+        # group_emb: [g, node_dims], weights: [N, g]
+        group_emb_weighted = torch.matmul(weights, self.group_emb)
+
+
+        node_emb = self.node_emb + group_emb_weighted
 
         embedded_x = self.embedding(x, te, node_emb)
         batch_size, _, num_nodes, dim = embedded_x.shape
 
         group_x = G.transpose(0,1) @ embedded_x
 
-        # graph = torch.matmul(self.group_emb, self.group_emb.transpose(0, 1))
-        # group_graph = F.softmax(F.relu(graph), dim=-1)
-        #
-        # support = group_x.squeeze(1) @ self.gcn_weight
-        # gcn_out = group_graph @ support
-        # y = gcn_out.transpose(1, 2)
-        # y = self.member_mixer(y)
-        # group_out = y.transpose(1, 2)
+        graph = torch.matmul(self.group_emb, self.group_emb.transpose(0, 1))
+        group_graph = F.softmax(F.relu(graph), dim=-1)
 
-        group_out = self.group_transformer(group_x.squeeze(1)) #[B, g, D]
+        support = group_x.squeeze(1) @ self.gcn_weight
+        gcn_out = group_graph @ support
+        y = gcn_out.transpose(1, 2)
+        y = self.member_mixer(y)
+        group_out = y.transpose(1, 2)
+
+        #group_out = self.group_transformer(group_x.squeeze(1)) #[B, g, D]
         group_out_G = G @ group_out
         group_out_res = group_out_G+embedded_x.squeeze(1) #[B, N, D]
         # mlp_out = self.res_mlp(group_out+embedded_x.squeeze(1))
         # mlp_out = mlp_out.transpose(1,2).unsqueeze(-1)
 
-        sorted_embeddings = group_out_res[:,sorted_indices,:]
+        # 此时，node_idx 的长度 M >= N
+        # M 就是扩展后的总 Token 数（所有组的节点总数）
+
+        # x: [B, N, D]
+        # 扩展 x: [B, M, D]
+        expanded_x = group_out_res[:, node_idx, :]
+
+        # 为了让 Transformer 知道组边界，你需要对 group_idx 进行排序
+        sorted_group_idx, sort_perm = torch.sort(group_idx)
+        sorted_node_idx = node_idx[sort_perm]
+        sorted_expanded_x = expanded_x[:, sort_perm, :]
+        #sorted_embeddings = group_out_res[:,sorted_indices,:]
 
         # 3. 找到每个分组的边界
+        M = sorted_expanded_x.shape[1]
         group_boundaries = torch.cat([
             torch.tensor([0], device=group_out_res.device),
-            torch.where(torch.diff(sorted_group_indices) != 0)[0] + 1,
-            torch.tensor([num_nodes], device=group_out_res.device)
+            torch.where(torch.diff(sorted_group_idx) != 0)[0] + 1,
+            torch.tensor([M], device=group_out_res.device)
         ])
-        group_context = group_x.squeeze(1).gather(
+        group_context = group_out.gather(
             1,
-            sorted_group_indices.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, dim)
+            sorted_group_idx.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, dim)
         )  # [B, N, D]
 
         # 4. 批量处理每个分组（避免小矩阵操作）
-        processed_embeddings = torch.zeros_like(sorted_embeddings)
+        processed_embeddings = torch.zeros_like(sorted_expanded_x)
         for i in range(len(group_boundaries) - 1):
             start, end = group_boundaries[i], group_boundaries[i+1]
             group_size = end - start
 
             if group_size > 0:
                 # 批量处理整个分组
-                group_emb = sorted_embeddings[:, start:end, :]
+                group_emb = sorted_expanded_x[:, start:end, :]
                 context = group_context[:, start:end, :]
 
                 # Transformer处理
@@ -288,8 +345,27 @@ class MySTG(nn.Module):
                 processed_embeddings[:, start:end, :] = group_emb
 
         # 5. 还原原始顺序
-        reverse_indices = torch.argsort(sorted_indices)
-        result = processed_embeddings[:, reverse_indices, :].transpose(1, 2).unsqueeze(-1)
+
+        # 初始化结果容器
+        output = torch.zeros(batch_size, num_nodes, dim, device=x.device)
+        count = torch.zeros(batch_size, num_nodes, 1, device=x.device)
+
+        # 对应的权重 (从 G 中获取)
+        weights = G[sorted_node_idx, sorted_group_idx] # [M]
+        weights = weights.view(1, -1, 1)
+        weights = weights.expand(batch_size, -1, -1)
+
+        # 聚合 (Sum)
+        # 把 sorted_output 加回到 output 的 sorted_node_idx 位置
+        output.scatter_add_(1, sorted_node_idx.view(1, -1, 1).expand(batch_size, -1, dim), processed_embeddings * weights)
+
+        # 计数 (用于计算平均)
+        count.scatter_add_(1, sorted_node_idx.view(1, -1, 1).expand(batch_size, -1, 1), weights)
+        final_output = output / torch.clamp(count, min=1e-8)
+        result = final_output.transpose(1, 2).unsqueeze(-1)
+
+        #reverse_indices = torch.argsort(sorted_node_idx)
+        #result = processed_embeddings[:, reverse_indices, :].transpose(1, 2).unsqueeze(-1)
 
         pred_y = self.regression_conv(result)
 
